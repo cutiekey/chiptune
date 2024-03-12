@@ -1,0 +1,29 @@
+{
+  "name": "@cutiekey/chiptune",
+  "version": "0.1.1",
+  "packageManager": "yarn@4.1.1",
+  "description": "A TypeScript version of `chiptune2.js`",
+  "author": {
+    "email": "her@mint.lgbt",
+    "name": "Luna Nova",
+    "url": "https://woem.men/@luna"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cutiekey/chiptune.git"
+  },
+  "main": "./built/index.js",
+  "types": "./built/index.d.ts",
+  "scripts": {
+    "build": "tsc -p \"./tsconfig.json\" && yarn build:copy",
+    "build:copy": "ncp \"./src/libopenmpt.d.ts\" \"./built/libopenmpt.d.ts\" && ncp \"./src/libopenmpt.wasm\" \"./built/libopenmpt.wasm\""
+  },
+  "devDependencies": {
+    "@types/emscripten": "1.38.0",
+    "@types/ncp": "^2",
+    "@types/node": "^20.11.26",
+    "ncp": "^2.0.0",
+    "typescript": "^5.4.2"
+  }
+}

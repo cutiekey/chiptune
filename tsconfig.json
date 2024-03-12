@@ -1,0 +1,25 @@
+{
+  "compileOnSave": false,
+  "compilerOptions": {
+    "allowJs": true,
+    "declaration": true,
+    "esModuleInterop": true,
+    "experimentalDecorators": true,
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "module": "esnext",
+    "moduleResolution": "node",
+    "noEmitOnError": false,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitAny": true,
+    "noImplicitReturns": true,
+    "noLib": false,
+    "noUncheckedIndexedAccess": true,
+    "outDir": "./built",
+    "removeComments": false,
+    "resolveJsonModule": true,
+    "sourceMap": true,
+    "strict": true,
+    "target": "es2022"
+  },
+  "include": ["./src/**/*"]
+}
