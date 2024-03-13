@@ -1,12 +1,16 @@
-import type { MainModule } from './libopenmpt.js'
+import _libopenmpt, { type MainModule } from './libopenmpt.js'
 
 export interface IProcessNode extends ScriptProcessorNode {
   cleanup(): void
   config: ChiptuneJsConfig
+  getProcessTime(): IProcessNode['perf']
   leftBufferPtr: number
   modulePtr: number
+  nbChannels: number
+  patternIndex: number
   pause(): void
   paused: boolean
+  perf: { current: number; max: number }
   player: ChiptuneJsPlayer
   rightBufferPtr: number
   stop(): void
@@ -14,53 +18,48 @@ export interface IProcessNode extends ScriptProcessorNode {
   unpause(): void
 }
 
-const libopenmpt = (await import('./libopenmpt.js')).default as MainModule
-
-const OPENMPT_MODULE_RENDER_INTERPOLATIONFILTER_LENGTH = 3
-const OPENMPT_MODULE_RENDER_STEREOSEPARATION_PERCENT = 2
+const libopenmpt = _libopenmpt as MainModule
 
 export class ChiptuneAudioContext extends AudioContext {}
 
 export class ChiptuneJsConfig {
   public context?: ChiptuneAudioContext
-  public interpolationFilter: number
   public repeatCount: number
-  public stereoSeparation: number
 
   constructor(
     repeatCount: number,
-    stereoSeparation: number,
-    interpolationFilter: number,
     context?: ChiptuneAudioContext
   ) {
     this.context = context
-    this.interpolationFilter = interpolationFilter
     this.repeatCount = repeatCount
-    this.stereoSeparation = stereoSeparation
   }
 }
 
 export class ChiptuneJsPlayer {
+  public audioContext: ChiptuneAudioContext
   public config: ChiptuneJsConfig
-  public context: ChiptuneAudioContext
+  public context: GainNode
   public currentPlayingNode?: IProcessNode
   public handlers: { eventName: string; handler: (...args: any[]) => void }[]
   public touchLocked: boolean
+  public volume: number
 
   constructor(config: ChiptuneJsConfig) {
+    this.audioContext = config.context || new ChiptuneAudioContext()
     this.config = config
-    this.context = config.context || new ChiptuneAudioContext()
+    this.context = this.audioContext.createGain()
     this.handlers = []
     this.touchLocked = true
+    this.volume = 1
   }
 
   public addHandler(eventName: string, handler: (...args: any[]) => void) {
     this.handlers.push({ eventName, handler })
   }
 
-  public createLibopenmptNode(buffer: Buffer, config: ChiptuneJsConfig) {
+  public createLibopenmptNode(buffer: ArrayBuffer, config: ChiptuneJsConfig) {
     let maxFramesPerChunk = 4096
-    let processNode = this.context.createScriptProcessor(
+    let processNode = this.audioContext.createScriptProcessor(
       2048,
       0,
       2
@@ -73,19 +72,6 @@ export class ChiptuneJsPlayer {
     let ptrToFile = libopenmpt._malloc(byteArray.byteLength)
 
     libopenmpt.HEAPU8.set(byteArray, ptrToFile)
-
-    processNode.modulePtr = libopenmpt._openmpt_module_create_from_memory(
-      ptrToFile,
-      byteArray.byteLength,
-      0,
-      0,
-      0
-    )
-
-    processNode.paused = false
-
-    processNode.leftBufferPtr = libopenmpt._malloc(maxFramesPerChunk * 4)
-    processNode.rightBufferPtr = libopenmpt._malloc(maxFramesPerChunk * 4)
 
     processNode.cleanup = function() {
       if (this.modulePtr !== 0) {
@@ -107,27 +93,37 @@ export class ChiptuneJsPlayer {
       }
     }
 
-    processNode.stop = function() {
-      this.disconnect()
-      this.cleanup()
+    processNode.getProcessTime = function() {
+      const max = this.perf.max
+
+      this.perf.max = 0
+
+      return {
+        current: this.perf.current,
+        max
+      }
     }
 
-    processNode.pause = function() {
-      this.paused = true
-    }
+    processNode.leftBufferPtr = libopenmpt._malloc(maxFramesPerChunk * 4)
 
-    processNode.unpause = function() {
-      this.paused = false
-    }
+    processNode.modulePtr = libopenmpt._openmpt_module_create_from_memory(
+      ptrToFile,
+      byteArray.byteLength,
+      0,
+      0,
+      0
+    )
 
-    processNode.togglePause = function() {
-      this.paused = !this.paused
-    }
+    processNode.nbChannels = libopenmpt._openmpt_module_get_num_channels(
+      processNode.modulePtr
+    )
 
     processNode.onaudioprocess = function(
       this: IProcessNode,
       ev: AudioProcessingEvent
     ) {
+      let startTimeP1 = performance.now()
+
       let outputL = ev.outputBuffer.getChannelData(0)
       let outputR = ev.outputBuffer.getChannelData(1)
 
@@ -157,6 +153,24 @@ export class ChiptuneJsPlayer {
       let ended = false
       let error = false
       let framesRendered = 0
+
+      let currentPattern = libopenmpt._openmpt_module_get_current_pattern(
+        this.modulePtr
+      )
+
+      let currentRow = libopenmpt._openmpt_module_get_current_row(
+        this.modulePtr
+      )
+
+      startTimeP1 -= performance.now()
+
+      if (currentPattern !== this.patternIndex) {
+        processNode.player.fireEvent('onPatternChange')
+      }
+
+      processNode.player.fireEvent('onRowChange', { index: currentRow })
+
+      let startTimeP2 = performance.now()
 
       while (framesToRender > 0) {
         let framesPerChunk = Math.min(framesToRender, maxFramesPerChunk)
@@ -206,7 +220,41 @@ export class ChiptuneJsPlayer {
           ? processNode.player.fireEvent('onError', { type: 'openmpt' })
           : processNode.player.fireEvent('onEnded')
       }
+
+      this.perf.current = performance.now() - startTimeP2 + startTimeP1
+
+      if (this.perf.current > this.perf.max) {
+        this.perf.max = this.perf.current
+      }
     } as any
+
+    processNode.patternIndex = -1
+
+    processNode.pause = function() {
+      this.paused = true
+    }
+
+    processNode.paused = false
+
+    processNode.perf = {
+      current: 0,
+      max: 0
+    }
+
+    processNode.rightBufferPtr = libopenmpt._malloc(maxFramesPerChunk * 4)
+
+    processNode.stop = function() {
+      this.disconnect()
+      this.cleanup()
+    }
+
+    processNode.togglePause = function() {
+      this.paused = !this.paused
+    }
+
+    processNode.unpause = function() {
+      this.paused = false
+    }
 
     return processNode
   }
@@ -227,82 +275,120 @@ export class ChiptuneJsPlayer {
     }
   }
 
-  public getCurrentOrder() {
-    return libopenmpt._openmpt_module_get_current_order(
-      this.currentPlayingNode!.modulePtr
-    )
-  }
-
-  public getCurrentPattern() {
-    return libopenmpt._openmpt_module_get_current_pattern(
-      this.currentPlayingNode!.modulePtr
-    )
-  }
-
-  public getCurrentRow() {
-    return libopenmpt._openmpt_module_get_current_row(
-      this.currentPlayingNode!.modulePtr
-    )
-  }
-
-  public getCurrentTime() {
-    return libopenmpt._openmpt_module_get_position_seconds(
-      this.currentPlayingNode!.modulePtr
-    )
-  }
-
-  public getTotalOrder() {
-    return libopenmpt._openmpt_module_get_num_orders(
-      this.currentPlayingNode!.modulePtr
-    )
-  }
-
-  public getTotalPatterns() {
-    return libopenmpt._openmpt_module_get_num_patterns(
-      this.currentPlayingNode!.modulePtr
-    )
-  }
-
-  public load(input: File | string, callback: (...args: any[]) => void) {
-    if (this.touchLocked) {
-      this.unlock()
+  public getCtls() {
+    if (this.currentPlayingNode && this.currentPlayingNode.modulePtr) {
+      return libopenmpt._openmpt_module_get_ctls(
+        this.currentPlayingNode.modulePtr
+      )
     }
 
-    let player = this
+    return 0
+  }
 
-    if (input instanceof File) {
-      let reader = new FileReader()
+  public getCurrentSpeed() {
+    if (this.currentPlayingNode && this.currentPlayingNode.modulePtr) {
+      return libopenmpt._openmpt_module_get_current_speed(
+        this.currentPlayingNode.modulePtr
+      )
+    }
 
-      reader.onload = function() {
-        return callback(reader.result)
-      }.bind(this)
+    return 0
+  }
 
-      reader.readAsArrayBuffer(input)
-    } else {
-      let xhr = new XMLHttpRequest()
+  public getCurrentTempo() {
+    if (this.currentPlayingNode && this.currentPlayingNode.modulePtr) {
+      return libopenmpt._openmpt_module_get_current_tempo(
+        this.currentPlayingNode.modulePtr
+      )
+    }
 
-      xhr.open('GET', input, true)
+    return 0
+  }
 
-      xhr.onabort = () => {
-        this.fireEvent('onError', { type: 'onxhr' })
+  public getNumPatterns() {
+    if (this.currentPlayingNode && this.currentPlayingNode.modulePtr) {
+      return libopenmpt._openmpt_module_get_num_patterns(
+        this.currentPlayingNode.modulePtr
+      )
+    }
+
+    return 0
+  }
+
+  public getPattern() {
+    if (this.currentPlayingNode && this.currentPlayingNode.modulePtr) {
+      return libopenmpt._openmpt_module_get_current_pattern(
+        this.currentPlayingNode.modulePtr
+      )
+    }
+
+    return 0
+  }
+
+  public getPatternNumRows(pattern: number) {
+    if (this.currentPlayingNode && this.currentPlayingNode.modulePtr) {
+      return libopenmpt._openmpt_module_get_pattern_num_rows(
+        this.currentPlayingNode.modulePtr,
+        pattern
+      )
+    }
+
+    return 0
+  }
+
+  public getPatternRowChannel(pattern: number, row: number, channel: number) {
+    if (this.currentPlayingNode && this.currentPlayingNode.modulePtr) {
+      return libopenmpt.UTF8ToString(
+        libopenmpt._openmpt_module_format_pattern_row_channel(
+          this.currentPlayingNode.modulePtr,
+          pattern,
+          row,
+          channel,
+          0,
+          (true as any)
+        )
+      )
+    }
+
+    return ''
+  }
+
+  public getRow() {
+    if (this.currentPlayingNode && this.currentPlayingNode.modulePtr) {
+      return libopenmpt._openmpt_module_get_current_row(
+        this.currentPlayingNode.modulePtr
+      )
+    }
+
+    return 0
+  }
+
+  public load(input: File | string) {
+    return new Promise<ArrayBuffer>((res, rej) => {
+      if (this.touchLocked) {
+        this.unlock()
       }
 
-      xhr.onerror = () => {
-        this.fireEvent('onError', { type: 'onxhr' })
-      }
+      if (input instanceof File) {
+        let reader = new FileReader()
 
-      xhr.onload = function() {
-        if (xhr.status === 200) {
-          return callback(xhr.response)
+        reader.onload = () => {
+          res(reader.result as ArrayBuffer)
         }
 
-        player.fireEvent('onError', { type: 'onxhr' })
-      }.bind(this)
-
-      xhr.responseType = 'arraybuffer'
-
-      xhr.send()
-    }
+        reader.readAsArrayBuffer(input)
+      } else {
+        fetch(input).then(response => {
+          response.arrayBuffer().then(arrayBuffer => {
+            res(arrayBuffer)
+          }).catch(err => {
+            rej(err)
+          })
+        }).catch(err => {
+          rej(err)
+        })
+      }
+    })
   }
 
   public metadata() {
@@ -315,12 +401,12 @@ export class ChiptuneJsPlayer {
       )
     ).split(';')
 
-    for (let i = 0; i < keys.length; i++) {
-      keyNameBuffer = libopenmpt._malloc(keys[i]!.length + 1)
+    for (let key of keys) {
+      keyNameBuffer = libopenmpt._malloc(key.length + 1)
 
-      libopenmpt.writeAsciiToMemory(keys[i]!, keyNameBuffer, false)
+      libopenmpt.writeAsciiToMemory(key, keyNameBuffer, false)
 
-      data[keys[i]!] = libopenmpt.UTF8ToString(
+      data[key] = libopenmpt.UTF8ToString(
         libopenmpt._openmpt_module_get_metadata(
           this.currentPlayingNode!.modulePtr,
           keyNameBuffer
@@ -333,19 +419,6 @@ export class ChiptuneJsPlayer {
     return data
   }
 
-  public moduleCtlSet(ctl: string, value: string) {
-    return libopenmpt.ccall(
-      'openmpt_module_ctl_set',
-      'number',
-      ['number', 'string', 'string'],
-      [
-        this.currentPlayingNode!.modulePtr,
-        ctl,
-        value
-      ]
-    ) === 1
-  }
-
   public onEnded(handler: (...args: any[]) => void) {
     this.addHandler('onEnded', handler)
   }
@@ -354,7 +427,8 @@ export class ChiptuneJsPlayer {
     this.addHandler('onError', handler)
   }
 
-  public play(buffer: Buffer) {
+  public play(buffer: ArrayBuffer) {
+    this.unlock()
     this.stop()
 
     let processNode = this.createLibopenmptNode(buffer, this.config)
@@ -365,24 +439,29 @@ export class ChiptuneJsPlayer {
 
     libopenmpt._openmpt_module_set_repeat_count(
       processNode.modulePtr,
-      this.config.repeatCount
-    )
-
-    libopenmpt._openmpt_module_set_render_param(
-      processNode.modulePtr,
-      OPENMPT_MODULE_RENDER_STEREOSEPARATION_PERCENT,
-      this.config.stereoSeparation
-    )
-
-    libopenmpt._openmpt_module_set_render_param(
-      processNode.modulePtr,
-      OPENMPT_MODULE_RENDER_INTERPOLATIONFILTER_LENGTH,
-      this.config.interpolationFilter
+      this.config.repeatCount || 0
     )
 
     this.currentPlayingNode = processNode
 
-    processNode.connect(this.context.destination)
+    processNode.connect(this.context)
+
+    this.context.connect(this.audioContext.destination)
+  }
+
+  public position() {
+    return libopenmpt._openmpt_module_get_position_seconds(
+      this.currentPlayingNode!.modulePtr
+    )
+  }
+
+  public seek(position: number) {
+    if (this.currentPlayingNode) {
+      libopenmpt._openmpt_module_set_position_seconds(
+        this.currentPlayingNode.modulePtr,
+        position
+      )
+    }
   }
 
   public stop() {
@@ -401,15 +480,26 @@ export class ChiptuneJsPlayer {
   }
 
   public unlock() {
-    let context = this.context
+    let context = this.audioContext
 
     let buffer = context.createBuffer(1, 1, 22050)
     let unlockSource = context.createBufferSource()
     unlockSource.buffer = buffer
 
-    unlockSource.connect(context.destination)
+    unlockSource.connect(this.context)
+
+    this.context.connect(context.destination)
+
     unlockSource.start(0)
 
     this.touchLocked = false
+  }
+
+  public version() {
+    if (this.currentPlayingNode && this.currentPlayingNode.modulePtr) {
+      return libopenmpt._openmpt_get_library_version()
+    }
+
+    return 0
   }
 }

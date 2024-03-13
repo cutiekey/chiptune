@@ -1,6 +1,6 @@
 {
   "name": "@cutiekey/chiptune",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "packageManager": "yarn@4.1.1",
   "description": "A TypeScript version of `chiptune2.js`",
   "author": {
